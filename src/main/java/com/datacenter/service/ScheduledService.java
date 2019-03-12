@@ -9,12 +9,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.*;
 
 /**
@@ -23,39 +25,28 @@ import java.util.concurrent.*;
 @Component
 public class ScheduledService {
 
-    @Autowired
-    JdbcTemplate jdbcTemplate;
 
     @Autowired
     PropertiesConfig propertiesConfig;
+
     private Map<String/**旧表名*/, String /**新表名*/> tableMatchOldAndNew;
 
 
     @Value("${insert.to.tidb.batch:5}")
-    private Integer  batch;
+    private Integer batch;
+    @Value("${insert.to.tidb.corePoolSize:5}")
+    private  Integer corePoolSize;
+    @Value("${insert.to.tidb.poolCapacity:5}")
+    private Integer poolCapacity;
 
-    private static int corePoolSize = 5;
-
-    private static ThreadPoolExecutor executorPutMap = new ThreadPoolExecutor(corePoolSize, corePoolSize * 2, 10l, TimeUnit.SECONDS,
-            new LinkedBlockingQueue<Runnable>(1000), new ThreadPoolExecutor.CallerRunsPolicy());
-
-    private static ThreadPoolExecutor executorInsertTidb = new ThreadPoolExecutor(corePoolSize, corePoolSize * 2, 10l, TimeUnit.SECONDS,
-            new LinkedBlockingQueue<Runnable>(1000), new ThreadPoolExecutor.CallerRunsPolicy());
-
+    private  static ThreadPoolExecutor executorPutMap ;
+    private  static ThreadPoolExecutor executorInsertTidb ;
     private static final Logger LOG = LoggerFactory.getLogger(ScheduledService.class);
-
-    public Integer getBatch() {
-        return batch;
-    }
-
-    public void setBatch(Integer batch) {
-        this.batch = batch;
-    }
 
     /**
      * 任务池
      */
-    private static Map<String /** 表名 */, HandlerDataMysql> handlerMap = new ConcurrentHashMap();
+    private static Map<String /** 表名 */, HandlerDataToDb> handlerMap = new ConcurrentHashMap();
 
     /**
      * 表名与Mapper对象的映射
@@ -63,6 +54,13 @@ public class ScheduledService {
     @PostConstruct
     public void init() {
         tableMatchOldAndNew = propertiesConfig.getTableMatchOldAndNew();
+        executorPutMap = new ThreadPoolExecutor(corePoolSize, corePoolSize * 2, 10l, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<Runnable>(poolCapacity), new ThreadPoolExecutor.CallerRunsPolicy());
+
+        executorInsertTidb = new ThreadPoolExecutor(corePoolSize, corePoolSize * 2, 10l, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<Runnable>(poolCapacity), new ThreadPoolExecutor.CallerRunsPolicy());
+
+
     }
 
     /**
@@ -73,54 +71,43 @@ public class ScheduledService {
 //        LOG.info( "scheduledExecutor execute start:" );
         try {
             //取出map数据
-            Collection<HandlerDataMysql> cons = handlerMap.values();
-            if(cons.isEmpty()){
+            Collection<HandlerDataToDb> cons = handlerMap.values();
+            if (cons.isEmpty()) {
                 LOG.info("list is empty....");
-                return ;
+                return;
             }
-            for (HandlerDataMysql handlerDataMysql : cons) {
+            for (HandlerDataToDb handlerDataToDb : cons) {
                 try {
-                    int count = handlerDataMysql.orgs.size()/batch;
-                    if(count>0){
-                        //旧数据入库
-                        executorInsertTidb.execute(new Runnable() {
-                            @Override
-                            public void run() {
-                                int[]  counts = null;
-                                List list = null;
-                                long start = System.currentTimeMillis();
-                                for(int i = 0;i<count;i++){
-                                    list = new ArrayList();
-                                    for(int j = 0;j<batch;j++){
-                                        try {
-                                            LOG.info(  "take start .....");
-                                            /**
-                                             * 最后一次循环可能不够batch条
-                                             */
-                                            if(handlerDataMysql.orgs.size()>0){
-                                                list.add(handlerDataMysql.orgs.take());
-                                            }
-                                            LOG.info(  "take end .....");
-                                        } catch (InterruptedException e) {
-                                            e.printStackTrace();
-                                        }
+                    int count = handlerDataToDb.orgs.size() / batch;
+                    if (count > 0) {
+                        List list = null;
+                        for (int i = 0; i < count; i++) {
+                            list = new ArrayList();
+                            for (int j = 0; j < batch; j++) {
+                                try {
+                                    LOG.info("take start .....");
+                                    /**
+                                     * 最后一次循环可能不够batch条
+                                     */
+                                    if (handlerDataToDb.orgs.size() > 0) {
+                                        list.add(handlerDataToDb.orgs.take());
                                     }
-                                    try{
-                                        counts = jdbcTemplate.batchUpdate(handlerDataMysql.sql, list);
-                                        LOG.info(  "execute 耗时："+(System.currentTimeMillis()-start)+"ms ;counts:"+Arrays.toString(counts) + handlerDataMysql.sql.substring(0,100));
-                                        start = System.currentTimeMillis();
-                                    }catch (Exception e){
-                                        String msg = e.getMessage();
-                                        LOG.error(handlerDataMysql.sql + " execute error:" + e.getMessage());
-                                    }
-
+                                    LOG.info("take end .....");
+                                } catch (InterruptedException e) {
+                                    e.printStackTrace();
                                 }
                             }
-                        });
+                            if(!list.isEmpty()){
+                                executorInsertTidb.execute(new ToTidbService(handlerDataToDb.sql,list));
+                            }else{
+                                LOG.info("list isEmpty  .....");
+                            }
+
+                        }
                     }
                 } catch (Exception e) {
                     String msg = e.getMessage();
-                    LOG.error(handlerDataMysql.sql + " execute error:" + e.getMessage());
+                    LOG.error(handlerDataToDb.sql + " execute error:" + e.getMessage());
                 }
             }
         } catch (Exception e) {
@@ -129,9 +116,8 @@ public class ScheduledService {
     }
 
 
-
     /**
-     * 解析kafka数据并入库操作
+     * 解析卡夫卡数据并入库操作
      *
      * @param content
      */
@@ -149,12 +135,12 @@ public class ScheduledService {
                 try {
                     KafkaConsumerEntity kafkaConsumerEntity = JSON.parseObject(content, KafkaConsumerEntity.class);
                     String key = kafkaConsumerEntity.getTable() + kafkaConsumerEntity.getType();
-                    HandlerDataMysql handlerDataMysql = handlerMap.get(key);
-                    if (handlerDataMysql == null) {
-                        handlerDataMysql = new HandlerDataMysql();
-                        handlerMap.put(key, handlerDataMysql);
+                    HandlerDataToDb handlerDataToDb = handlerMap.get(key);
+                    if (handlerDataToDb == null) {
+                        handlerDataToDb = new HandlerDataToDb();
+                        handlerMap.put(key, handlerDataToDb);
                     }
-                    handlerDataMysql.jdbcInsert(kafkaConsumerEntity);
+                    handlerDataToDb.jdbcInsert(kafkaConsumerEntity);
                 } catch (Exception e) {
                     LOG.info(">>>>>>>> KafkaConsumerListener --> kafkaToTidb-->put to map error:" + e.getMessage());
                 }
@@ -166,10 +152,7 @@ public class ScheduledService {
     }
 
 
-    /**
-     * 插入到数据库
-     */
-    class HandlerDataMysql {
+    class HandlerDataToDb {
         /**
          * 需要执行的SQL
          */
@@ -185,7 +168,7 @@ public class ScheduledService {
          */
         private ArrayBlockingQueue<Object[]> orgs;
 
-        public HandlerDataMysql() {
+        public HandlerDataToDb() {
             orgs = new ArrayBlockingQueue(1000);
         }
 
@@ -293,6 +276,32 @@ public class ScheduledService {
 
         }
 
+    }
+
+
+
+    public Integer getBatch() {
+        return batch;
+    }
+
+    public void setBatch(Integer batch) {
+        this.batch = batch;
+    }
+
+    public Integer getCorePoolSize() {
+        return corePoolSize;
+    }
+
+    public void setCorePoolSize(Integer corePoolSize) {
+        this.corePoolSize = corePoolSize;
+    }
+
+    public Integer getPoolCapacity() {
+        return poolCapacity;
+    }
+
+    public void setPoolCapacity(Integer poolCapacity) {
+        this.poolCapacity = poolCapacity;
     }
 }
 

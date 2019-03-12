@@ -1,6 +1,6 @@
 package com.datacenter.kafka;
 
-import com.deppon.datacenter.utils.KafkaConfig;
+import com.datacenter.utils.KafkaConfig;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
@@ -53,15 +53,10 @@ public class KafkaConsumerConfig {
         return new DefaultKafkaConsumerFactory(consumerProperties());
     }
 
-    /**
-     * kafka基本参数
-     * @return
-     */
     @Bean
     public Map<String, Object> consumerProperties() {
         Map<String, Object> props= new HashMap<String, Object>();
 
-        //kafka地址
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, kafkaConfig.getKafkaService());
         props.put(ConsumerConfig.GROUP_ID_CONFIG,  kafkaConfig.getGroupId());
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG,  kafkaConfig.getAutoCommit());
@@ -74,10 +69,6 @@ public class KafkaConsumerConfig {
        return props;
     }
 
-    /**
-     * 自己实现的消费逻辑
-     * @return
-     */
     @Bean
     public KafkaConsumerListener kafkaConsumerListener(){
         return new KafkaConsumerListener();
